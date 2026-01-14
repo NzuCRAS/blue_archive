@@ -38,7 +38,7 @@ export const userChat = defineStore('userChat', () => {
         return messages.value[key];
     }
 
-    // 追加私聊消息
+    // 追加私聊消息：把消息放到 otherId 的会话数组里
     function appendPrivateMessage(fromUserId, toUserId, msg) {
         const myId = String(me.getUserId());
         const from = String(fromUserId);
@@ -47,11 +47,13 @@ export const userChat = defineStore('userChat', () => {
         const key = `user_${otherId}`;
         messages.value[key] = messages.value[key] || [];
 
+        // 确保保留 logicMessageId（用于撤回匹配）
         if (msg && msg.logicMessageId == null) {
             msg.logicMessageId = msg.id;
         }
+        // 给我发出的消息加上已读标记（默认未读，等对方读到后置 true）
         if (String(msg?.fromUserId) === myId) {
-            if (typeof msg._read === 'undefined') msg._read = !!msg.isRead; // 若后端含 isRead，可初始化
+            if (typeof msg._read === 'undefined') msg._read = false;
         }
 
         messages.value[key].push(msg);
@@ -59,6 +61,8 @@ export const userChat = defineStore('userChat', () => {
         const sel = selectedConversation.value;
         if (sel && String(sel.id) === otherId) {
             // 当前会话：可在此发送已读回执（按需）
+        } else {
+            // 非当前会话：可增加未读计数（按需）
         }
     }
 
@@ -97,15 +101,16 @@ export const userChat = defineStore('userChat', () => {
                 }
                 const timestamp = created ? new Date(created).getTime() : (p.timestamp || Date.now());
 
-                // 若后端未返回 isRead，在后续显示逻辑中默认 false/true 按 fromUserId 判断
+                const logicMessageId =
+                    p.logicMessageId ??
+                    p.logic_message_id ??
+                    p.logicId ??
+                    p.logic_id ??
+                    p.id;
+
                 const msg = {
                     id: p.id,
-                    logicMessageId:
-                        p.logicMessageId ??
-                        p.logic_message_id ??
-                        p.logicId ??
-                        p.logic_id ??
-                        p.id,
+                    logicMessageId,
                     conversationType: p.conversationType,
                     fromUserId: p.fromUserId,
                     toUserId: p.toUserId,
@@ -113,8 +118,7 @@ export const userChat = defineStore('userChat', () => {
                     messageType: p.messageType,
                     content: p.content,
                     imageUrl: p.imageUrl || p.fileUrl || null,
-                    timestamp,
-                    isRead: p.isRead, // 新增：用于初始化气泡的读回执（仅对我发出的消息有意义）
+                    timestamp
                 };
 
                 appendPrivateMessage(p.fromUserId, p.toUserId, msg);
@@ -138,9 +142,11 @@ export const userChat = defineStore('userChat', () => {
         if (user === null) return;
         const key = `user_${String(user.id)}`;
         messages.value[key] = messages.value[key] || [];
+        // 清零未读并通知后端
         markConversationRead(user.id);
     }
 
+    // 预览文案
     function buildPreview(messageType, content) {
         const t = String(messageType || '').toUpperCase();
         if (t === 'IMAGE') return '[图片]';
@@ -210,6 +216,7 @@ export const userChat = defineStore('userChat', () => {
         return (agreeingList.value || []).length;
     }
 
+    // 撤回：按 logicMessageId 移除所有会话里的该条消息（A/B 两端皆适用）
     function recallMessageByLogicId(logicId) {
         if (logicId === undefined || logicId === null) return;
         const logicStr = String(logicId);
@@ -219,6 +226,7 @@ export const userChat = defineStore('userChat', () => {
             const filtered = arr.filter(m => {
                 const mid = String(m.id);
                 const lid = m.logicMessageId != null ? String(m.logicMessageId) : '';
+                // 发送者侧：id 就是 logicId；接收者侧：需要对比 logicMessageId
                 return mid !== logicStr && lid !== logicStr;
             });
             if (filtered.length !== arr.length) {
@@ -227,6 +235,7 @@ export const userChat = defineStore('userChat', () => {
         });
     }
 
+    // 已读：对方 readerId 打开后端确认已读 -> 本端把“我发给 readerId 的消息”全部标记为已读
     function markMyMessagesReadByReader(readerId) {
         const key = `user_${String(readerId)}`;
         const arr = messages.value[key] || [];
@@ -234,29 +243,6 @@ export const userChat = defineStore('userChat', () => {
         arr.forEach(m => {
             if (String(m.fromUserId) === myId) m._read = true;
         });
-    }
-
-    // Typing indicator state per conversation
-    const peerTypingMap = ref({}); // { otherId: boolean }
-    const peerTypingTimers = {};   // { otherId: timeoutId }
-
-    function setPeerTyping(otherId, isTyping) {
-        const oid = String(otherId);
-        peerTypingMap.value[oid] = !!isTyping;
-        // Auto clear after 5s if no subsequent typing
-        if (peerTypingTimers[oid]) {
-            clearTimeout(peerTypingTimers[oid]);
-            peerTypingTimers[oid] = null;
-        }
-        if (isTyping) {
-            peerTypingTimers[oid] = setTimeout(() => {
-                peerTypingMap.value[oid] = false;
-                peerTypingTimers[oid] = null;
-            }, 5000);
-        }
-    }
-    function isPeerTyping(otherId) {
-        return !!peerTypingMap.value[String(otherId)];
     }
 
     return {
@@ -279,8 +265,5 @@ export const userChat = defineStore('userChat', () => {
         getPendingRequestsCount,
         recallMessageByLogicId,
         markMyMessagesReadByReader,
-        // typing
-        setPeerTyping,
-        isPeerTyping,
     };
 });

@@ -1,13 +1,12 @@
-// RealTime.js - add PEER_TYPING handling and typing start/stop senders
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import { userStore } from "@/stores/UserStore.js";
-import { userChat } from "@/stores/userChat.js";
+import {userStore} from "@/stores/UserStore.js";
+import {userChat} from "@/stores/userChat.js";
 
 export const realTime = defineStore('realTime', () => {
-    let ws = null;
+    let ws=null;
     let connected = ref(false);
-    const user = userStore();
+    const user=userStore();
 
     const _signalListeners = new Map();
     function onSignal(type, handler) {
@@ -76,12 +75,12 @@ export const realTime = defineStore('realTime', () => {
         if (ws) ws.close();
     }
 
-    const userchat = userChat();
+    const userchat=userChat()
     function handleEnvelope(env) {
         const rawType = env && env.type;
         const type = (rawType === null || rawType === undefined) ? '' : String(rawType).trim();
         const p = env.payload || {};
-        switch (type) {
+        switch(type) {
             case 'CALL_INVITE':
             case 'CALL_ANSWER':
             case 'CALL_ICE':
@@ -163,31 +162,11 @@ export const realTime = defineStore('realTime', () => {
                 }
                 break;
             }
+            // 读回执：对方(friendId)已读到了 lastReadMessageId -> 把“我发给 friendId 的消息”标记为已读
             case 'PRIVATE_MESSAGES_READ': {
-                try {
-                    const readerId = Number(p.readerId);
-                    const friendId = Number(p.friendId);
-                    // 对端读了“我发给TA”的消息 -> 在该会话将我方消息标记为已读
-                    if (!Number.isNaN(readerId)) {
-                        userchat.markMyMessagesReadByReader(readerId);
-                    } else if (!Number.isNaN(friendId)) {
-                        // 兼容字段名（有时会用 friendId 表示对端）
-                        userchat.markMyMessagesReadByReader(friendId);
-                    }
-                } catch (e) {
-                    console.error('[WS] 处理 PRIVATE_MESSAGES_READ 出错', e, p);
-                }
-                break;
-            }
-            case 'PEER_TYPING': {
-                try {
-                    const otherId = Number(p.fromUserId);
-                    const isTyping = !!p.isTyping;
-                    if (!Number.isNaN(otherId)) {
-                        userchat.setPeerTyping(otherId, isTyping);
-                    }
-                } catch (e) {
-                    console.error('[WS] 处理 PEER_TYPING 出错', e, p);
+                const readerId = p.readerId ?? p.reader_id;
+                if (readerId != null) {
+                    userchat.markMyMessagesReadByReader(readerId);
                 }
                 break;
             }
@@ -221,7 +200,6 @@ export const realTime = defineStore('realTime', () => {
             console.error('[WS SEND] send 出错', e);
         }
     }
-
     function sendPrivateText(targetUserId, content) {
         const payload = {
             conversationType: 'PRIVATE',
@@ -234,14 +212,6 @@ export const realTime = defineStore('realTime', () => {
         sendWsEnvelope('SEND_MESSAGE', payload);
     }
 
-    // Typing indicator senders
-    function startTyping(targetUserId) {
-        sendWsEnvelope('TYPING_START', { targetUserId: Number(targetUserId) });
-    }
-    function stopTyping(targetUserId) {
-        sendWsEnvelope('TYPING_STOP', { targetUserId: Number(targetUserId) });
-    }
-
     return {
         initWs,
         closeWs,
@@ -249,7 +219,5 @@ export const realTime = defineStore('realTime', () => {
         sendPrivateText,
         onSignal,
         offSignal,
-        startTyping,
-        stopTyping,
     };
 });

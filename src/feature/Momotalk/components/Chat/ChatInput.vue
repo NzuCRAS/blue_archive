@@ -16,16 +16,7 @@
       </button>
     </div>
 
-    <textarea
-        ref="messageEl"
-        v-model="draft"
-        class="editor"
-        @keydown="onKeydown"
-        @focus="onEditorFocus"
-        @blur="onEditorBlur"
-        @input="onEditorInput"
-        placeholder="输入消息…"
-    ></textarea>
+    <textarea ref="messageEl" v-model="draft" class="editor" @keydown="onKeydown"></textarea>
     <button class="send" @click="send">发送<span class="iconfont icon-fasong1" style="margin-left: 4px;font-size: 25px" ></span></button>
 
     <!-- 非阻塞来电 modal -->
@@ -99,13 +90,12 @@ const fileInput = ref(null);
 // send text
 async function send() {
   const text = draft.value && draft.value.trim();
-  if (!text || !selected.value) return;
+  if (!text) return;
+  if (!selected.value) return;
   const targetId = String(selected.value.id);
   draft.value = '';
   try {
     rt.sendPrivateText(targetId, text);
-    // 发送后停止“正在输入”
-    stopTypingNow();
   } catch (e) {
     console.error('发送消息出错', e);
   }
@@ -438,16 +428,16 @@ async function startVideoCall() {
     return;
   }
 
+  // Generate Call ID
   const targetUserId = Number(selected.value.id);
   callId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + String(Math.random()).slice(2);
 
   try {
+     // 1. Get User Media
     if (typeof navigator === 'undefined') {
       throw new Error('Navigator is undefined in this environment.');
     }
-
     const md = navigator.mediaDevices ?? null;
-
     if (md && typeof md.getUserMedia === 'function') {
       localStream = await md.getUserMedia({ video: true, audio: true });
     } else {
@@ -457,12 +447,73 @@ async function startVideoCall() {
             legacyGetUserMedia.call(navigator, { video: true, audio: true }, resolve, reject)
         );
       } else {
-        throw new Error('getUserMedia is not available. Ensure you run in a browser (not SSR), use HTTPS (or localhost), and allow camera/microphone permissions.');
+        throw new Error('getUserMedia is not available.');
       }
     }
+
+    // 2. Show UI
     createVideoContainer();
     if (localVideoEl) localVideoEl.srcObject = localStream;
 
+    // 3. Define Handlers FIRST (Fix TDZ issue)
+    const onAnswer = async (payload) => {
+      if (payload.callId !== callId) return;
+      try {
+        if (!pc) {
+          pendingAnswers.set(payload.callId, payload);
+          return;
+        }
+        // If we are stable, or have local offer, we can accept answer
+        if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'have-local-pranswer') {
+           await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+           // flush any pending ICE
+           const iceQueue = pendingIce.get(callId) || [];
+           for (const ice of iceQueue) {
+               await pc.addIceCandidate(new RTCIceCandidate({
+                   candidate: ice.candidate,
+                   sdpMid: ice.sdpMid,
+                   sdpMLineIndex: ice.sdpMLineIndex
+               })).catch(e => console.error('flush ice error', e));
+           }
+           pendingIce.delete(callId);
+        } else {
+          // If state is not right, maybe buffer or ignore? 
+          // Usually 'stable' means we are already done.
+          console.warn('Received Answer but state is', pc.signalingState);
+        }
+      } catch (e) {
+        console.error('setRemoteDescription failed', e);
+      }
+    };
+
+    const onIce = async (payload) => {
+      if (payload.callId !== callId) return;
+      try {
+        if (pc && pc.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate({
+              candidate: payload.candidate,
+              sdpMid: payload.sdpMid,
+              sdpMLineIndex: payload.sdpMLineIndex
+            }));
+        } else {
+            handleSignalIce(payload);
+        }
+      } catch (e) { console.error('addIceCandidate failed', e); }
+    };
+
+    const onReject = (payload) => {
+      if (payload.callId !== callId) return;
+      ElMessage.info('对方已拒绝');
+      cleanupVideoCall();
+    };
+
+    const onHangup = (payload) => {
+      if (payload.callId !== callId) return;
+      ElMessage.info('通话已结束');
+      cleanupVideoCall();
+    };
+
+    // 4. Create PeerConnection
     pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
@@ -485,14 +536,18 @@ async function startVideoCall() {
 
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
+    // 5. Create Offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+
+    // 6. Check Pending Answer (rare but possible)
     const pending = pendingAnswers.get(callId);
     if (pending) {
       await onAnswer(pending);
       pendingAnswers.delete(callId);
     }
 
+    // 7. Send Invite
     rt.sendWsEnvelope('CALL_INVITE', {
       targetUserId,
       callId,
@@ -500,45 +555,7 @@ async function startVideoCall() {
       metadata: 'video,audio'
     });
 
-    // register handlers
-    const onAnswer = async (payload) => {
-      if (payload.callId !== callId) return;
-      try {
-        if (!pc) {
-          pendingAnswers.set(payload.callId, payload);
-          return;
-        }
-        if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'have-local-pranswer') {
-          await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-        } else {
-          pendingAnswers.set(payload.callId, payload);
-        }
-      } catch (e) {
-        console.error('setRemoteDescription failed', e);
-      }
-    };
-
-    const onIce = async (payload) => {
-      if (payload.callId !== callId) return;
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate({
-          candidate: payload.candidate,
-          sdpMid: payload.sdpMid,
-          sdpMLineIndex: payload.sdpMLineIndex
-        }));
-      } catch (e) { console.error('addIceCandidate failed', e); }
-    };
-
-    const onReject = (payload) => {
-      if (payload.callId !== callId) return;
-      cleanupVideoCall();
-    };
-
-    const onHangup = (payload) => {
-      if (payload.callId !== callId) return;
-      cleanupVideoCall();
-    };
-
+    // 8. Register Signal Listeners
     rt.onSignal && rt.onSignal('CALL_ANSWER', onAnswer);
     rt.onSignal && rt.onSignal('CALL_ICE', onIce);
     rt.onSignal && rt.onSignal('CALL_REJECT', onReject);
@@ -548,6 +565,7 @@ async function startVideoCall() {
 
   } catch (e) {
     console.error('startVideoCall failed', e);
+    ElMessage.error('无法启动视频通话: ' + e.message);
     cleanupVideoCall();
   }
 }
@@ -1046,53 +1064,6 @@ onBeforeUnmount(() => {
 
   window.removeEventListener('openWhiteboard', onGlobalOpenWhiteboard);
 });
-
-/* -------- Typing indicator (微信式) -------- */
-const TYPING_INACTIVITY_MS = 2000; // 无输入 2s 后认为停止
-let typingActive = false;
-let typingStopTimer = null;
-
-function startTypingNow() {
-  if (!selected.value) return;
-  if (!typingActive) {
-    typingActive = true;
-    rt.startTyping(selected.value.id);
-  }
-  resetTypingTimer();
-}
-
-function stopTypingNow() {
-  if (!selected.value) return;
-  if (typingActive) {
-    typingActive = false;
-    rt.stopTyping(selected.value.id);
-  }
-  clearTypingTimer();
-}
-
-function resetTypingTimer() {
-  clearTypingTimer();
-  typingStopTimer = setTimeout(() => {
-    stopTypingNow();
-  }, TYPING_INACTIVITY_MS);
-}
-function clearTypingTimer() {
-  if (typingStopTimer) {
-    clearTimeout(typingStopTimer);
-    typingStopTimer = null;
-  }
-}
-
-function onEditorFocus() {
-  startTypingNow();
-}
-function onEditorBlur() {
-  stopTypingNow();
-}
-function onEditorInput() {
-  // 每次输入重置定时器，避免频繁发送
-  startTypingNow();
-}
 </script>
 
 <style scoped>
@@ -1106,15 +1077,25 @@ function onEditorInput() {
   border-top: 1px solid rgba(255, 179, 217, 0.3);
   overflow-y: auto;
 }
-.buttons{ display: flex; gap:8px; }
+.buttons{
+  display: flex;
+  gap:8px;
+}
 .icon_container{
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px; height: 30px;
+  width: 30px;
+  height: 30px;
 }
-.icon_container:hover{ background-color: rgba(255,240,245,1); }
-.wb-icon{ width:24px; height:24px; display:block; }
+.icon_container:hover{
+  background-color: rgba(255,240,245,1);
+}
+.wb-icon{
+  width:24px;
+  height:24px;
+  display:block;
+}
 .editor{
   flex: 1;
   width: 100%;
@@ -1124,14 +1105,25 @@ function onEditorInput() {
   border: none;
   outline: none;
 }
-.send{
-  width: 80px; height: 32px;
-  background-color: rgb(241 157 170);
-  color: white; border-radius: 20px;
-  transition: all 0.5s ease; font-size: 16px;
-  align-self: flex-end; margin-top: 8px;
+.editor:focus{
+  outline: none;
 }
-.send:hover{ cursor: pointer; transform: scale(1.02); background-color: rgba(241,157,170,0.7); }
+.send{
+  width: 80px;
+  height: 32px;
+  background-color: rgb(241 157 170);
+  color: white;
+  border-radius: 20px;
+  transition: all 0.5s ease;
+  font-size: 16px;
+  align-self: flex-end;
+  margin-top: 8px;
+}
+.send:hover{
+  cursor: pointer;
+  transform: scale(1.02);
+  background-color: rgba(241,157,170,0.7);
+}
 
 /* incoming modal */
 .incoming-modal {
