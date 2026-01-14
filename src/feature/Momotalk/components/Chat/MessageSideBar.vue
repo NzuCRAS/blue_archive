@@ -15,7 +15,7 @@ import FriendList from "@/feature/Momotalk/components/Chat/FriendList.vue";
 .sidebar{
   display: flex;
   flex-direction: column;
-  width: 255px;
+  width: 100%;
   height: 100%;
   border-right: 1px solid rgba(255, 179, 217, 0.3);
 }
